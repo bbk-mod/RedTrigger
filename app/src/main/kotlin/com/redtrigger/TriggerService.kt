@@ -74,26 +74,25 @@ class TriggerService : Service() {
 
             val shizukuAvailable = rikka.shizuku.Shizuku.pingBinder()
             DebugLog.log("Shizuku", "pingBinder=$shizukuAvailable")
-            if (shizukuAvailable) {
-                val permission = rikka.shizuku.Shizuku.checkSelfPermission()
-                DebugLog.log("Shizuku", "checkSelfPermission=$permission (0=granted)")
-                InputReader.onTrigger = { trigger, isDown ->
-                    if (isDown) {
-                        DebugLog.log("Trigger", "${trigger.name} pressed")
-                    }
-                }
-                InputReader.init(this)
-                InputReader.start()
-                DebugLog.log("Shizuku", "InputReader.start() called")
-            } else {
-                DebugLog.log("Shizuku", "Not available, input reading disabled")
+
+            InputReader.onTrigger = { trigger, isDown ->
+                if (isDown) DebugLog.log("Trigger", "${trigger.name} down")
+                TriggerGestureDetector.onEvent(applicationContext, trigger, isDown)
             }
+            InputReader.init(this)
+
+            // Always call start(): when Shizuku is down it registers the binder
+            // listener and waits, so the reader connects once Shizuku comes up.
+            InputReader.start()
+            DebugLog.log("Shizuku", "InputReader.start() called (ping=$shizukuAvailable)")
         } catch (e: Exception) {
             DebugLog.log("Shizuku", "ERROR: ${e.javaClass.simpleName}: ${e.message}")
         }
     }
 
     private fun startObserving() {
+        stopObserving()
+
         val handler = Handler(Looper.getMainLooper())
 
         // Watch nubia_game_scene — the one SystemMgr resets on activity changes
@@ -170,6 +169,8 @@ class TriggerService : Service() {
     override fun onDestroy() {
         shuttingDown = true
         stopObserving()
+        TriggerGestureDetector.reset()
+        InputReader.onTrigger = null
         InputReader.stop()
         isRunning = false
         resetCount = 0

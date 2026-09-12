@@ -12,6 +12,7 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.statusBars
@@ -36,13 +37,19 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.activity.compose.BackHandler
+import com.redtrigger.AppCatalog
 import com.redtrigger.BootReceiver
 import com.redtrigger.DebugLog
 import com.redtrigger.InputReader
+import com.redtrigger.MediaControlService
+import com.redtrigger.TriggerAction
+import com.redtrigger.TriggerGesture
 import com.redtrigger.TriggerManager
 import com.redtrigger.TriggerService
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
 private const val GITHUB_URL = "https://github.com/lzampier/RedTrigger"
@@ -76,8 +83,15 @@ fun MainContent(onNavigate: (Screen) -> Unit) {
     var shizukuPermission by remember { mutableStateOf(false) }
     var keyMapperInstalled by remember { mutableStateOf(false) }
     var autoEnableOnBoot by remember { mutableStateOf(false) }
+    var notificationAccess by remember { mutableStateOf(false) }
     var statusTick by remember { mutableStateOf(0L) }
     var menuExpanded by remember { mutableStateOf(false) }
+
+    // Action picker state
+    var gestureTarget by remember { mutableStateOf<InputReader.Trigger?>(null) }
+    var actionTarget by remember { mutableStateOf<ActionTarget?>(null) }
+    var appPickRequest by remember { mutableStateOf<AppPickRequest?>(null) }
+    var shellTarget by remember { mutableStateOf<ActionTarget?>(null) }
 
     val context = LocalContext.current
     @Suppress("DEPRECATION")
@@ -90,6 +104,7 @@ fun MainContent(onNavigate: (Screen) -> Unit) {
         shizukuInstalled = TriggerManager.isShizukuInstalled(context)
         shizukuRunning = TriggerManager.isShizukuRunning()
         shizukuPermission = TriggerManager.isShizukuPermission()
+        notificationAccess = MediaControlService.isEnabled(context)
     }
 
     val shizukuOk = shizukuInstalled && shizukuRunning && shizukuPermission
@@ -267,6 +282,23 @@ fun MainContent(onNavigate: (Screen) -> Unit) {
                                             Toast.makeText(context, "Failed: ${e.message}", Toast.LENGTH_SHORT).show()
                                         }
                                     }
+                                }
+                            }
+                        )
+
+                        // Notification access — required only for per-app media actions
+                        PrerequisiteRow(
+                            label = "Notification access",
+                            status = notificationAccess,
+                            fixLabel = "Grant",
+                            subtitle = "Needed to target one app's playback",
+                            onFix = {
+                                try {
+                                    context.startActivity(
+                                        Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS")
+                                    )
+                                } catch (e: Exception) {
+                                    Toast.makeText(context, "Failed: ${e.message}", Toast.LENGTH_SHORT).show()
                                 }
                             }
                         )
@@ -473,6 +505,35 @@ fun MainContent(onNavigate: (Screen) -> Unit) {
                             BootReceiver.setAutoEnable(context, enabled)
                             autoEnableOnBoot = enabled
                         }
+
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+                        Text(
+                            text = "Trigger actions",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        Text(
+                            text = "What each shoulder trigger does when pressed. " +
+                                "Leave on None to use the triggers purely as gamepad buttons.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        ActionRow(
+                            label = "Left trigger (F7)",
+                            trigger = InputReader.Trigger.LEFT,
+                            refreshKey = statusTick,
+                            onClick = { gestureTarget = InputReader.Trigger.LEFT }
+                        )
+
+                        ActionRow(
+                            label = "Right trigger (F8)",
+                            trigger = InputReader.Trigger.RIGHT,
+                            refreshKey = statusTick,
+                            onClick = { gestureTarget = InputReader.Trigger.RIGHT }
+                        )
                     }
                 }
 
@@ -534,6 +595,69 @@ fun MainContent(onNavigate: (Screen) -> Unit) {
 
                 Spacer(modifier = Modifier.height(16.dp))
             }
+        }
+
+        // ── Action picker dialogs ──
+
+        gestureTarget?.let { trigger ->
+            GesturePickerDialog(
+                trigger = trigger,
+                onDismiss = { gestureTarget = null },
+                onPick = { gesture ->
+                    gestureTarget = null
+                    actionTarget = ActionTarget(trigger, gesture)
+                }
+            )
+        }
+
+        actionTarget?.let { target ->
+            ActionTypeDialog(
+                target = target,
+                onDismiss = { actionTarget = null },
+                onPick = { kind ->
+                    actionTarget = null
+                    when (kind) {
+                        ActionKind.None -> {
+                            TriggerAction.save(context, target.trigger, target.gesture, TriggerAction.None)
+                            statusTick++
+                        }
+                        ActionKind.QuickSwitch -> {
+                            TriggerAction.save(context, target.trigger, target.gesture, TriggerAction.QuickSwitch)
+                            statusTick++
+                        }
+                        ActionKind.Media -> appPickRequest = AppPickRequest(target, isMedia = true)
+                        ActionKind.Launch -> appPickRequest = AppPickRequest(target, isMedia = false)
+                        ActionKind.Shell -> shellTarget = target
+                    }
+                }
+            )
+        }
+
+        appPickRequest?.let { request ->
+            AppPickerDialog(
+                onDismiss = { appPickRequest = null },
+                onPick = { entry ->
+                    appPickRequest = null
+                    val action = if (request.isMedia) {
+                        TriggerAction.MediaPlayPause(entry.packageName, entry.component)
+                    } else {
+                        TriggerAction.LaunchApp(entry.packageName, entry.component)
+                    }
+                    TriggerAction.save(context, request.target.trigger, request.target.gesture, action)
+                    statusTick++
+                }
+            )
+        }
+
+        shellTarget?.let { target ->
+            ShellCommandDialog(
+                onDismiss = { shellTarget = null },
+                onPick = { command ->
+                    shellTarget = null
+                    TriggerAction.save(context, target.trigger, target.gesture, TriggerAction.ShellCommand(command))
+                    statusTick++
+                }
+            )
         }
     }
 }
@@ -907,4 +1031,270 @@ fun StatusRowTriState(label: String, state: InputReader.State) {
             )
         }
     }
+}
+
+// ── Trigger action pickers ──
+
+enum class ActionKind { None, QuickSwitch, Media, Launch, Shell }
+
+private data class ActionTarget(val trigger: InputReader.Trigger, val gesture: TriggerGesture)
+
+private data class AppPickRequest(val target: ActionTarget, val isMedia: Boolean)
+
+/** Summary lines for a trigger, one per bound gesture. */
+private fun boundGestures(context: Context, trigger: InputReader.Trigger): List<Pair<TriggerGesture, TriggerAction>> =
+    TriggerGesture.entries.mapNotNull { gesture ->
+        val action = TriggerAction.load(context, trigger, gesture)
+        if (action == TriggerAction.None) null else gesture to action
+    }
+
+@Composable
+fun ActionRow(
+    label: String,
+    trigger: InputReader.Trigger,
+    refreshKey: Long,
+    onClick: () -> Unit
+) {
+    val context = LocalContext.current
+    val bound = remember(trigger, refreshKey) { boundGestures(context, trigger) }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 8.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            if (bound.isEmpty()) {
+                Text(
+                    text = "No action",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                bound.forEach { (gesture, action) ->
+                    Text(
+                        text = "${gesture.label}: ${TriggerAction.describe(action)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+        }
+        Text(
+            text = "Change",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
+fun GesturePickerDialog(
+    trigger: InputReader.Trigger,
+    onDismiss: () -> Unit,
+    onPick: (TriggerGesture) -> Unit
+) {
+    val context = LocalContext.current
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("${trigger.name.lowercase().replaceFirstChar { it.uppercase() }} trigger") },
+        text = {
+            Column {
+                Text(
+                    text = "Choose which press to configure.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                TriggerGesture.entries.forEach { gesture ->
+                    val action = TriggerAction.load(context, trigger, gesture)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onPick(gesture) }
+                            .padding(vertical = 10.dp)
+                    ) {
+                        Text(
+                            text = gesture.label,
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = TriggerAction.describe(action),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (action == TriggerAction.None)
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            else
+                                MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
+@Composable
+private fun ActionTypeDialog(
+    target: ActionTarget,
+    onDismiss: () -> Unit,
+    onPick: (ActionKind) -> Unit
+) {
+    val options = listOf(
+        ActionKind.None to "None",
+        ActionKind.QuickSwitch to "Switch to previous app",
+        ActionKind.Media to "Play/pause a specific app",
+        ActionKind.Launch to "Open an app",
+        ActionKind.Shell to "Shell command"
+    )
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("${target.gesture.label} — ${target.trigger.name.lowercase()}") },
+        text = {
+            Column {
+                options.forEach { (kind, title) ->
+                    Text(
+                        text = title,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onPick(kind) }
+                            .padding(vertical = 12.dp),
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
+@Composable
+fun AppPickerDialog(onDismiss: () -> Unit, onPick: (AppCatalog.Entry) -> Unit) {
+    val context = LocalContext.current
+    // Listing apps resolves every launcher package's label, which is far too slow
+    // for the main thread on a device with many apps.
+    val apps by produceState(initialValue = emptyList<AppCatalog.Entry>()) {
+        value = withContext(Dispatchers.IO) { AppCatalog.launchable(context) }
+    }
+    var query by remember { mutableStateOf("") }
+
+    val filtered = remember(query, apps) {
+        if (query.isBlank()) apps
+        else apps.filter {
+            it.label.contains(query, ignoreCase = true) ||
+                it.packageName.contains(query, ignoreCase = true)
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Choose an app") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    label = { Text("Search") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                if (filtered.isEmpty()) {
+                    Text(
+                        text = if (apps.isEmpty()) "Loading apps…" else "No apps found.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
+                        items(filtered) { entry ->
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onPick(entry) }
+                                    .padding(vertical = 10.dp)
+                            ) {
+                                Text(
+                                    text = entry.label,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = entry.packageName,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
+@Composable
+fun ShellCommandDialog(onDismiss: () -> Unit, onPick: (String) -> Unit) {
+    var command by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Shell command") },
+        text = {
+            Column {
+                Text(
+                    text = "Run as the shell user, via sh -c. Whatever you type here runs with " +
+                        "shell privileges, so only enter commands you trust.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                OutlinedTextField(
+                    value = command,
+                    onValueChange = { command = it },
+                    label = { Text("Command") },
+                    placeholder = { Text("input keyevent KEYCODE_MEDIA_NEXT") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onPick(command) },
+                enabled = command.isNotBlank()
+            ) { Text("Save") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
 }

@@ -5,6 +5,7 @@ import java.io.BufferedReader
 import java.io.BufferedWriter
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
+import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
 /**
@@ -25,18 +26,26 @@ class InputService : IInputService.Stub() {
         // Linux evdev keycodes for gamepad shoulder buttons
         private const val BTN_TL = 310
         private const val BTN_TR = 311
+
+        /** Cap on a single shell command so a hung command cannot block the binder thread forever. */
+        private const val SHELL_TIMEOUT_MS = 10_000L
+
+        /** Bound on draining the output pipe once the process has already exited. */
+        private const val READER_JOIN_MS = 1_000L
     }
 
     private val readerProcesses = mutableListOf<Process>()
     private val readerThreads = mutableListOf<Thread>()
     @Volatile private var reading = false
     @Volatile private var injectionEnabled = true
-    private var activeCallback: ITriggerCallback? = null
+    @Volatile private var activeCallback: ITriggerCallback? = null
 
     // uinput injector process
     private var uinputProcess: Process? = null
-    private var uinputWriter: BufferedWriter? = null
+    @Volatile private var uinputWriter: BufferedWriter? = null
     @Volatile private var uinputReady = false
+    private val injectorLock = Any()
+    @Volatile private var injectorBusy = false
 
     override fun detectDevices(): String {
         return try {
@@ -94,6 +103,8 @@ class InputService : IInputService.Stub() {
      * Extract and start the uinput injector binary.
      */
     private fun startUinputInjector() {
+        if (!reading) return
+
         try {
             // Kill stale uinput processes from previous runs
             try {
@@ -294,25 +305,53 @@ class InputService : IInputService.Stub() {
         val value = if (isDown) 1 else 0
         val label = if (trigger == 0) "L1" else "R1"
 
-        if (!uinputReady || uinputWriter == null) {
+        val writer = uinputWriter
+        if (!uinputReady || writer == null) {
             debugMsg("Inject", "FAIL $label: uinput not ready")
+            restartInjectorAsync()
             return
         }
 
         try {
-            uinputWriter!!.write("$evdevCode $value\n")
-            uinputWriter!!.flush()
+            writer.write("$evdevCode $value\n")
+            writer.flush()
             debugMsg("Inject", "uinput $label ${if (isDown) "DOWN" else "UP"} (evdev=$evdevCode)")
         } catch (e: Exception) {
             debugMsg("Inject", "uinput write failed: ${e.message}")
+            uinputWriter = null
             uinputReady = false
+            restartInjectorAsync()
+        }
+    }
+
+    /**
+     * Rebuild the injector off the reader thread so a dead uinput process does not
+     * permanently disable remapping. Guarded so a burst of key events cannot spawn
+     * parallel restarts.
+     */
+    private fun restartInjectorAsync() {
+        if (!injectionEnabled || !reading) return
+        synchronized(injectorLock) {
+            if (injectorBusy) return
+            injectorBusy = true
+        }
+
+        thread(name = "uinput-restart", isDaemon = true) {
+            try {
+                startUinputInjector()
+            } finally {
+                synchronized(injectorLock) { injectorBusy = false }
+            }
         }
     }
 
     override fun setInjectionEnabled(enabled: Boolean) {
         injectionEnabled = enabled
         if (enabled && !uinputReady && reading) {
-            startUinputInjector()
+            // Through the guarded path: a restart triggered by a failed write may be in
+            // flight, and two concurrent startUinputInjector() runs would race on the
+            // process/writer fields.
+            restartInjectorAsync()
         } else if (!enabled) {
             stopUinputInjector()
         }
@@ -320,6 +359,7 @@ class InputService : IInputService.Stub() {
 
     override fun stopReading() {
         reading = false
+        activeCallback = null
         stopUinputInjector()
         readerProcesses.forEach { try { it.destroy() } catch (_: Exception) {} }
         readerThreads.forEach { try { it.interrupt() } catch (_: Exception) {} }
@@ -334,6 +374,47 @@ class InputService : IInputService.Stub() {
             debugMsg("Permission", "pm grant $permission exit=$exitCode")
         } catch (e: Exception) {
             debugMsg("Permission", "pm grant failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Run a command as shell. argv form — no shell interpretation, so the caller
+     * cannot accidentally (or deliberately) inject shell syntax. Callers that
+     * genuinely want a shell pass ["sh", "-c", line] explicitly.
+     */
+    override fun runShellCommand(argv: Array<String>?): String {
+        if (argv == null || argv.isEmpty()) return "ERROR: empty command"
+
+        return try {
+            // stderr is merged into stdout so there is a single pipe to drain.
+            // Reading two pipes in sequence can deadlock once either buffer fills.
+            val proc = ProcessBuilder(*argv).redirectErrorStream(true).start()
+            val output = StringBuffer()
+
+            val reader = thread(name = "shell-read", isDaemon = true) {
+                runCatching { proc.inputStream.bufferedReader().forEachLine { output.appendLine(it) } }
+            }
+
+            if (!proc.waitFor(SHELL_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                proc.destroyForcibly()
+                runCatching { proc.inputStream.close() }
+                debugMsg("Shell", "TIMEOUT after ${SHELL_TIMEOUT_MS}ms: ${argv.joinToString(" ")}")
+                return "ERROR: timeout after ${SHELL_TIMEOUT_MS}ms"
+            }
+
+            // The process has exited, so the reader is at EOF or nearly so. Bound the
+            // wait anyway, then force the pipe shut: a grandchild that inherited it
+            // would otherwise keep the reader blocked. The reader is a daemon, so even
+            // a wedged one cannot pin the JVM.
+            reader.join(READER_JOIN_MS)
+            runCatching { proc.inputStream.close() }
+
+            val combined = output.toString().trim()
+            debugMsg("Shell", "${argv.joinToString(" ")} -> exit=${proc.exitValue()}${if (combined.isEmpty()) "" else ": $combined"}")
+            combined
+        } catch (e: Exception) {
+            debugMsg("Shell", "ERROR: ${e.message}")
+            "ERROR: ${e.message}"
         }
     }
 

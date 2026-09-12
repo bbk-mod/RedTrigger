@@ -8,6 +8,15 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!--
+      Needed to list launchable apps in the action picker. Launching itself does
+      not require it (shell can start anything), but queryIntentActivities() for
+      MAIN/LAUNCHER only returns packages visible to us.
+    -->
+    <uses-permission
+        android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
+
     <!-- Package visibility: detect KeyMapper, Game Space, and game services -->
     <queries>
         <package android:name="moe.shizuku.privileged.api" />
@@ -74,6 +83,22 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Keeps shoulder trigger sensors active by monitoring system settings" />
+        </service>
+
+        <!--
+          Notification listener: the only route for an ordinary app to reach
+          other apps' MediaSessions, which is what lets a trigger target one
+          specific app instead of whichever session is currently active.
+          Must be exported so the system can bind it.
+        -->
+        <service
+            android:name=".MediaControlService"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
         </service>
 
         <service

@@ -18,8 +18,8 @@ android {
         applicationId = "com.redtrigger"
         minSdk = 29
         targetSdk = 35
-        versionCode = 50
-        versionName = "3.0.15"
+        versionCode = 51
+        versionName = "3.0.16"
 
         vectorDrawables {
             useSupportLibrary = true
@@ -62,6 +62,7 @@ android {
     buildFeatures {
         compose = true
         aidl = true
+        buildConfig = true
     }
     
     composeOptions {

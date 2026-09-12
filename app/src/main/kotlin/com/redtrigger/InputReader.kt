@@ -39,13 +39,18 @@ object InputReader {
 
     private var inputService: IInputService? = null
 
+    /** Shizuku listeners are registered once per start/stop cycle */
+    private var listenersRegistered = false
+
     private val userServiceArgs = Shizuku.UserServiceArgs(
         ComponentName("com.redtrigger", InputService::class.java.name)
     )
         .daemon(false)
         .processNameSuffix("input")
-        .debuggable(true)
-        .version(1)
+        .debuggable(BuildConfig.DEBUG)
+        // Bump whenever IInputService changes: Shizuku uses this to decide whether an
+        // already-running service (loaded from the previous APK) must be recycled.
+        .version(2)
 
     /**
      * Update injection state and propagate to the running InputService.
@@ -57,6 +62,28 @@ object InputReader {
             DebugLog.log("InputReader", "Injection ${if (enabled) "ON" else "OFF"}")
         } catch (e: Exception) {
             DebugLog.log("InputReader", "Failed to propagate injection state: ${e.message}")
+        }
+    }
+
+    /**
+     * Run a command as the shell uid via the UserService. Returns combined
+     * stdout+stderr, or null when the service is not connected.
+     *
+     * Blocks the calling thread until the command exits (bounded by the
+     * service-side timeout), so call this off the main thread.
+     */
+    fun runShellCommand(vararg argv: String): String? {
+        val service = inputService
+        if (service == null) {
+            DebugLog.log("Shell", "Not connected, cannot run: ${argv.joinToString(" ")}")
+            return null
+        }
+
+        return try {
+            service.runShellCommand(arrayOf(*argv))
+        } catch (e: Exception) {
+            DebugLog.log("Shell", "ERROR: ${e.javaClass.simpleName}: ${e.message}")
+            null
         }
     }
 
@@ -74,14 +101,12 @@ object InputReader {
                 // where enableTriggers() couldn't write because permission wasn't granted yet)
                 appContext?.let { TriggerManager.applyTriggerSettings(it) }
 
-                val devices = inputService?.detectDevices() ?: ""
-                DebugLog.log("InputReader", "Detected devices: $devices")
-
+                // startReading() detects devices itself and logs the result
                 inputService?.setInjectionEnabled(injectionEnabled)
                 DebugLog.log("InputReader", "Config: inject=$injectionEnabled")
 
                 inputService?.startReading(triggerCallback)
-                DebugLog.log("InputReader", "Reading started on $devices")
+                DebugLog.log("InputReader", "Reading started")
             } catch (e: Exception) {
                 DebugLog.log("InputReader", "ERROR starting: ${e.javaClass.simpleName}: ${e.message}")
             }
@@ -91,6 +116,18 @@ object InputReader {
             inputService = null
             state = State.STOPPED
             DebugLog.log("InputReader", "UserService disconnected")
+        }
+
+        override fun onNullBinding(name: ComponentName?) {
+            inputService = null
+            state = State.STOPPED
+            DebugLog.log("InputReader", "UserService returned null binding")
+        }
+
+        override fun onBindingDied(name: ComponentName?) {
+            inputService = null
+            state = State.STOPPED
+            DebugLog.log("InputReader", "UserService binding died")
         }
     }
 
@@ -113,7 +150,7 @@ object InputReader {
         }
     }
 
-    private val permissionListener = rikka.shizuku.Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
+    private val permissionListener = rikka.shizuku.Shizuku.OnRequestPermissionResultListener { _, grantResult ->
         if (grantResult == android.content.pm.PackageManager.PERMISSION_GRANTED) {
             DebugLog.log("InputReader", "Shizuku permission granted, retrying start")
             start()
@@ -125,6 +162,30 @@ object InputReader {
         start()
     }
 
+    private val binderDeadListener = rikka.shizuku.Shizuku.OnBinderDeadListener {
+        DebugLog.log("InputReader", "Shizuku binder died, waiting for restart")
+        inputService = null
+        state = State.STOPPED
+    }
+
+    /**
+     * Kept registered for the whole start/stop cycle so the reader recovers when
+     * Shizuku starts or restarts. Re-registering is a no-op.
+     */
+    private fun registerListeners() {
+        if (listenersRegistered) return
+        listenersRegistered = true
+        try { Shizuku.addBinderReceivedListenerSticky(binderReceivedListener) } catch (_: Exception) {}
+        try { Shizuku.addBinderDeadListener(binderDeadListener) } catch (_: Exception) {}
+    }
+
+    private fun unregisterListeners() {
+        if (!listenersRegistered) return
+        listenersRegistered = false
+        try { Shizuku.removeBinderReceivedListener(binderReceivedListener) } catch (_: Exception) {}
+        try { Shizuku.removeBinderDeadListener(binderDeadListener) } catch (_: Exception) {}
+    }
+
     fun start() {
         if (state == State.RUNNING || state == State.STARTING) {
             DebugLog.log("InputReader", "Already ${state.name.lowercase()}")
@@ -132,17 +193,16 @@ object InputReader {
         }
 
         state = State.STARTING
+        registerListeners()
 
         try {
             val ping = Shizuku.pingBinder()
             DebugLog.log("InputReader", "Shizuku.pingBinder=$ping")
             if (!ping) {
                 DebugLog.log("InputReader", "Shizuku not running yet, waiting for binder")
-                try { Shizuku.addBinderReceivedListenerSticky(binderReceivedListener) } catch (_: Exception) {}
+                state = State.STOPPED
                 return
             }
-
-            try { Shizuku.removeBinderReceivedListener(binderReceivedListener) } catch (_: Exception) {}
 
             val perm = Shizuku.checkSelfPermission()
             DebugLog.log("InputReader", "Shizuku permission=$perm (0=granted)")
@@ -166,6 +226,8 @@ object InputReader {
     fun stop() {
         try { inputService?.stopReading() } catch (_: Exception) {}
         try { Shizuku.unbindUserService(userServiceArgs, serviceConnection, true) } catch (_: Exception) {}
+        try { Shizuku.removeRequestPermissionResultListener(permissionListener) } catch (_: Exception) {}
+        unregisterListeners()
         inputService = null
         state = State.STOPPED
         DebugLog.log("InputReader", "Stopped")

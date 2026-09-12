@@ -13,3 +13,8 @@ AUDIT_REPORT.md
 app/src/main/assets/redtrigger_uinput
 *.jks
 keystore.properties
+
+# Local build toolchain (SDK, JDK, Gradle cache) kept inside the repo
+.toolchain/
+.android-sdk/
+.build-cache/

@@ -18,6 +18,13 @@ interface IInputService {
     /** Grant a runtime permission to the app (runs as shell uid). */
     void grantPermission(String permission);
 
+    /**
+     * Run a command as the shell uid (argv form, no shell interpretation).
+     * Blocks until the process exits and returns combined stdout+stderr, or a
+     * message starting with "ERROR:" if the command could not be started.
+     */
+    String runShellCommand(in String[] argv);
+
     /** Destroy the service. */
     void destroy();
 }
