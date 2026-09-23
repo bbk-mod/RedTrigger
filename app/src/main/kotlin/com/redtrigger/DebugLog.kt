@@ -18,6 +18,8 @@ object DebugLog {
         private set
 
     fun log(tag: String, message: String) {
+        if (!BuildConfig.DEBUG) return
+
         val timestamp = dateFormat.format(Date())
         val isError = "ERROR" in message || "FAIL" in message || "Exception" in message
         val entry = "$timestamp [$tag] $message"

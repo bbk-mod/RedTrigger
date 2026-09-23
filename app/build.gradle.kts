@@ -18,8 +18,8 @@ android {
         applicationId = "com.redtrigger"
         minSdk = 29
         targetSdk = 35
-        versionCode = 51
-        versionName = "3.0.16"
+        versionCode = 63
+        versionName = "3.1.0"
 
         vectorDrawables {
             useSupportLibrary = true
@@ -28,7 +28,7 @@ android {
 
     if (keystorePropsFile.exists()) {
         signingConfigs {
-            create("release") {
+            create("personal") {
                 storeFile = file(keystoreProps["storeFile"] as String)
                 storePassword = keystoreProps["storePassword"] as String
                 keyAlias = keystoreProps["keyAlias"] as String
@@ -44,9 +44,13 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            if (keystorePropsFile.exists()) {
-                signingConfig = signingConfigs.getByName("release")
-            }
+        }
+        if (keystorePropsFile.exists()) {
+            // One key for both variants: installing a debug build over a release one
+            // (or vice versa) is otherwise refused with a signature mismatch.
+            val personal = signingConfigs.getByName("personal")
+            getByName("release").signingConfig = personal
+            getByName("debug").signingConfig = personal
         }
     }
     

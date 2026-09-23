@@ -5,9 +5,11 @@ import android.content.Context
 import android.media.session.MediaController
 import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.service.notification.NotificationListenerService
+import androidx.annotation.RequiresApi
 import androidx.core.app.NotificationManagerCompat
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -106,6 +108,34 @@ class MediaControlService : NotificationListenerService() {
          */
         fun controllersFor(context: Context, packageName: String): List<MediaController> =
             onMain { activeSessionsOnMain(context, packageName) }.orEmpty()
+
+        /**
+         * Package a global media key would reach right now, or null when it cannot be
+         * read. With no active session the system reports the last session's media
+         * button receiver — the component that revives a killed app's playback — so a
+         * match means the global key is targeted after all.
+         *
+         * Requires notification listener access (which [isEnabled] checks); API 33+.
+         * Blocking; call off the main thread.
+         */
+        fun mediaKeyEventTarget(): String? {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return null
+
+            return onMain { mediaKeyEventTargetOnMain() }
+        }
+
+        @RequiresApi(Build.VERSION_CODES.TIRAMISU)
+        private fun mediaKeyEventTargetOnMain(): String? {
+            val service = instance ?: return null
+
+            return try {
+                val manager = service.getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager
+                manager.mediaKeyEventSessionPackageName.ifEmpty { null }
+            } catch (e: Exception) {
+                DebugLog.log(TAG, "mediaKeyEventSession failed: ${e.javaClass.simpleName}: ${e.message}")
+                null
+            }
+        }
 
         /**
          * Wait until [packageName] has a session, up to [timeoutMs].

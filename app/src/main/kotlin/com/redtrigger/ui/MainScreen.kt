@@ -19,9 +19,7 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -35,27 +33,26 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.activity.compose.BackHandler
 import com.redtrigger.AppCatalog
 import com.redtrigger.BootReceiver
 import com.redtrigger.DebugLog
 import com.redtrigger.InputReader
 import com.redtrigger.MediaControlService
+import com.redtrigger.MediaDiagnostics
 import com.redtrigger.TriggerAction
 import com.redtrigger.TriggerGesture
 import com.redtrigger.TriggerManager
 import com.redtrigger.TriggerService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
 private const val GITHUB_URL = "https://github.com/lzampier/RedTrigger"
 
-/** Top-level nav: main screen vs debug log */
-enum class Screen { Main, DebugLog, About }
+/** Top-level nav: main screen vs about */
+enum class Screen { Main, About }
 
 @Composable
 fun MainScreen() {
@@ -64,9 +61,6 @@ fun MainScreen() {
     when (currentScreen) {
         Screen.Main -> MainContent(
             onNavigate = { currentScreen = it }
-        )
-        Screen.DebugLog -> DebugLogScreen(
-            onBack = { currentScreen = Screen.Main }
         )
         Screen.About -> AboutScreen(
             onBack = { currentScreen = Screen.Main }
@@ -92,6 +86,7 @@ fun MainContent(onNavigate: (Screen) -> Unit) {
     var actionTarget by remember { mutableStateOf<ActionTarget?>(null) }
     var appPickRequest by remember { mutableStateOf<AppPickRequest?>(null) }
     var shellTarget by remember { mutableStateOf<ActionTarget?>(null) }
+    var showDiagnostics by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
     @Suppress("DEPRECATION")
@@ -195,13 +190,6 @@ fun MainContent(onNavigate: (Screen) -> Unit) {
                         expanded = menuExpanded,
                         onDismissRequest = { menuExpanded = false }
                     ) {
-                        DropdownMenuItem(
-                            text = { Text("Debug Log") },
-                            onClick = {
-                                menuExpanded = false
-                                onNavigate(Screen.DebugLog)
-                            }
-                        )
                         DropdownMenuItem(
                             text = { Text("About") },
                             onClick = {
@@ -590,6 +578,33 @@ fun MainContent(onNavigate: (Screen) -> Unit) {
                                 Text("Open KeyMapper")
                             }
                         }
+
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+                        var diagnosticsEnabled by remember { mutableStateOf(MediaDiagnostics.isEnabled(context)) }
+
+                        ToggleRow("Media diagnostics", diagnosticsEnabled) { enabled ->
+                            diagnosticsEnabled = enabled
+                            MediaDiagnostics.setEnabled(context, enabled)
+                            DebugLog.log("Config", "Media diagnostics ${if (enabled) "ON" else "OFF"}")
+                        }
+
+                        Text(
+                            text = "While on, each play action records its playback-state timing and " +
+                                "platform dumps (media session, audio focus, foreground service, logcat). " +
+                                "Run the trigger, then open the report.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        val diagnosticsReport = remember(statusTick) { MediaDiagnostics.lastReport() }
+
+                        OutlinedButton(
+                            onClick = { showDiagnostics = true },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(if (diagnosticsReport.isBlank()) "Show media diagnostics" else "Show media diagnostics (report ready)")
+                        }
                     }
                 }
 
@@ -659,156 +674,55 @@ fun MainContent(onNavigate: (Screen) -> Unit) {
                 }
             )
         }
+
+        if (showDiagnostics) {
+            MediaDiagnosticsDialog(
+                report = MediaDiagnostics.lastReport(),
+                onDismiss = { showDiagnostics = false }
+            )
+        }
     }
 }
 
-// ── Debug Log Screen ──
-
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DebugLogScreen(onBack: () -> Unit) {
+private fun MediaDiagnosticsDialog(report: String, onDismiss: () -> Unit) {
     val context = LocalContext.current
-    var logVersion by remember { mutableStateOf(0L) }
-    val entries = remember(logVersion) { DebugLog.getEntries() }
-    val listState = rememberLazyListState()
 
-    BackHandler(onBack = onBack)
-
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(1000)
-            val v = DebugLog.version
-            if (v != logVersion) {
-                logVersion = v
-            }
-        }
-    }
-
-    LaunchedEffect(logVersion) {
-        if (entries.isNotEmpty()) {
-            listState.animateScrollToItem(entries.size - 1)
-        }
-    }
-
-    Surface(
-        modifier = Modifier.fillMaxSize(),
-        color = MaterialTheme.colorScheme.background
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .windowInsetsPadding(WindowInsets.statusBars)
-        ) {
-            // Top bar
-            TopAppBar(
-                title = { Text("Debug Log") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                    }
-                },
-                actions = {
-                    TextButton(onClick = {
-                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        clipboard.setPrimaryClip(
-                            ClipData.newPlainText("RedTrigger Log", entries.joinToString("\n"))
-                        )
-                        Toast.makeText(context, "Log copied (${entries.size} entries)", Toast.LENGTH_SHORT).show()
-                    }) {
-                        Text("Copy")
-                    }
-                    TextButton(onClick = {
-                        DebugLog.clear()
-                        logVersion = DebugLog.version
-                    }) {
-                        Text("Clear")
-                    }
-                }
-            )
-
-            // Toggle & Diff button
-            val canToggle = TriggerManager.hasWriteSecureSettings(context) || rikka.shizuku.Shizuku.pingBinder()
-            var isDiffing by remember { mutableStateOf(false) }
-            val coroutineScope = rememberCoroutineScope()
-
-            Button(
-                onClick = {
-                    if (isDiffing) return@Button
-                    isDiffing = true
-                    coroutineScope.launch {
-                        val wasEnabled = TriggerManager.isTriggersEnabled(context)
-                        val before = TriggerManager.dumpAllSettings(context)
-                        if (wasEnabled) {
-                            TriggerManager.disableTriggers(context)
-                        } else {
-                            TriggerManager.enableTriggers(context)
-                        }
-                        delay(2000)
-                        val after = TriggerManager.dumpAllSettings(context)
-                        val diff = TriggerManager.diffSettings(before, after)
-                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        clipboard.setPrimaryClip(ClipData.newPlainText("Settings Diff", diff))
-                        Toast.makeText(context, "Diff copied (${diff.count { it == '\n' }} lines)", Toast.LENGTH_LONG).show()
-                        isDiffing = false
-                    }
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 4.dp),
-                enabled = canToggle && !isDiffing,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.tertiary
-                )
-            ) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Media diagnostics") },
+        text = {
+            if (report.isBlank()) {
                 Text(
-                    if (isDiffing) "Diffing... (2s)" else "Toggle & Diff ALL Settings",
-                    modifier = Modifier.padding(4.dp)
+                    text = "No report yet. Turn on Media diagnostics, run a media trigger, then reopen this.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                Text(
+                    text = report,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 420.dp)
+                        .verticalScroll(rememberScrollState())
                 )
             }
-
-            if (entries.isEmpty()) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "No log entries yet.\nEnable triggers to see activity.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            } else {
-                SelectionContainer {
-                    LazyColumn(
-                        state = listState,
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(horizontal = 12.dp, vertical = 8.dp)
-                    ) {
-                        items(entries) { entry ->
-                            val color = when {
-                                "ERROR" in entry -> MaterialTheme.colorScheme.error
-                                "[Watchdog]" in entry -> MaterialTheme.colorScheme.tertiary
-                                "[Trigger]" in entry -> MaterialTheme.colorScheme.primary
-                                "[Shizuku]" in entry -> MaterialTheme.colorScheme.secondary
-                                else -> MaterialTheme.colorScheme.onSurface
-                            }
-                            Text(
-                                text = entry,
-                                style = MaterialTheme.typography.bodySmall.copy(
-                                    fontSize = 11.sp,
-                                    fontFamily = FontFamily.Monospace,
-                                    lineHeight = 16.sp
-                                ),
-                                color = color,
-                                modifier = Modifier.padding(vertical = 1.dp)
-                            )
-                        }
-                    }
-                }
-            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    clipboard.setPrimaryClip(ClipData.newPlainText("RedTrigger media diagnostics", report))
+                },
+                enabled = report.isNotBlank()
+            ) { Text("Copy") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Close") }
         }
-    }
+    )
 }
 
 // ── About Screen ──
