@@ -640,6 +640,10 @@ fun MainContent(onNavigate: (Screen) -> Unit) {
                             TriggerAction.save(context, target.trigger, target.gesture, TriggerAction.QuickSwitch)
                             statusTick++
                         }
+                        ActionKind.Lockdown -> {
+                            TriggerAction.save(context, target.trigger, target.gesture, TriggerAction.Lockdown)
+                            statusTick++
+                        }
                         ActionKind.Media -> appPickRequest = AppPickRequest(target, isMedia = true)
                         ActionKind.Launch -> appPickRequest = AppPickRequest(target, isMedia = false)
                         ActionKind.Shell -> shellTarget = target
@@ -949,7 +953,7 @@ fun StatusRowTriState(label: String, state: InputReader.State) {
 
 // ── Trigger action pickers ──
 
-enum class ActionKind { None, QuickSwitch, Media, Launch, Shell }
+enum class ActionKind { None, QuickSwitch, Lockdown, Media, Launch, Shell }
 
 private data class ActionTarget(val trigger: InputReader.Trigger, val gesture: TriggerGesture)
 
@@ -1072,6 +1076,7 @@ private fun ActionTypeDialog(
     val options = listOf(
         ActionKind.None to "None",
         ActionKind.QuickSwitch to "Switch to previous app",
+        ActionKind.Lockdown to "Lockdown (disable biometrics)",
         ActionKind.Media to "Play/pause a specific app",
         ActionKind.Launch to "Open an app",
         ActionKind.Shell to "Shell command"

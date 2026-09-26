@@ -10,8 +10,8 @@ import android.view.ViewConfiguration
  * Turns raw press/release edges from a shoulder trigger into gestures.
  *
  * InputService reports a plain down/up pair; this class decides whether that was
- * a tap, a double-tap, a triple-tap or a hold, and dispatches the action bound to
- * that gesture.
+ * a tap, a double-tap, a triple-tap, a hold, or a tap-then-hold, and dispatches
+ * the action bound to that gesture.
  *
  * Latency tradeoff: telling a single tap apart from the start of a double-tap
  * requires waiting one double-tap window after the release. That delay is only
@@ -38,8 +38,9 @@ object TriggerGestureDetector {
     private class State {
         var tapCount = 0
         var longPressFired = false
+        var followsTap = false
         var pressStartTime = 0L
-        var lastDownTime = 0L
+        var lastReleaseTime = 0L
         var longPressRunnable: Runnable? = null
         var finalizeRunnable: Runnable? = null
     }
@@ -55,8 +56,12 @@ object TriggerGestureDetector {
         val state = states.getOrPut(trigger) { State() }
 
         val wantsHold = TriggerAction.isBound(context, trigger, TriggerGesture.LONG_PRESS)
+        val wantsTapHold = TriggerAction.isBound(context, trigger, TriggerGesture.TAP_HOLD)
         val wantsMultiTap = TriggerAction.isBound(context, trigger, TriggerGesture.DOUBLE_TAP) ||
             TriggerAction.isBound(context, trigger, TriggerGesture.TRIPLE_TAP)
+        // Tap-then-hold also relies on the gap after a tap, so a lone tap must be
+        // held back until the second press has had its chance to arrive.
+        val wantsSequence = wantsMultiTap || wantsTapHold
 
         if (isDown) {
             // A new press means the previous sequence did not end in a finalize.
@@ -69,20 +74,29 @@ object TriggerGestureDetector {
 
             // Guard against a lost release: if the previous sequence is long over, the
             // stale tap count must not fold into this press and resolve as a double tap.
-            if (state.tapCount > 0 && now - state.lastDownTime > doubleTapTimeout) {
+            // Measured from the last release, not the last press — the double-tap window
+            // is release-to-press, so a long first tap must not look like a stale
+            // sequence (that would drop the TAP and break tap-then-hold).
+            if (state.tapCount > 0 && now - state.lastReleaseTime > doubleTapTimeout) {
                 state.tapCount = 0
             }
 
-            state.lastDownTime = now
             state.pressStartTime = now
             state.tapCount++
             state.longPressFired = false
+            // A press continuing an in-flight sequence is the hold half of tap-then-hold.
+            state.followsTap = state.tapCount >= 2
 
-            if (wantsHold) {
+            if (wantsHold || wantsTapHold) {
                 val runnable = Runnable {
                     state.longPressFired = true
                     state.tapCount = 0
-                    dispatch(context, trigger, TriggerGesture.LONG_PRESS)
+                    when {
+                        wantsTapHold && state.followsTap ->
+                            dispatch(context, trigger, TriggerGesture.TAP_HOLD)
+                        wantsHold ->
+                            dispatch(context, trigger, TriggerGesture.LONG_PRESS)
+                    }
                 }
                 state.longPressRunnable = runnable
                 handler.postDelayed(runnable, longPressTimeout)
@@ -92,6 +106,7 @@ object TriggerGestureDetector {
         }
 
         // Release
+        state.lastReleaseTime = SystemClock.uptimeMillis()
         state.longPressRunnable?.let { handler.removeCallbacks(it) }
         state.longPressRunnable = null
 
@@ -102,14 +117,14 @@ object TriggerGestureDetector {
             return
         }
 
-        if (!wantsMultiTap) {
+        if (!wantsSequence) {
             // Nothing to disambiguate, so duration is irrelevant: fire on release.
             state.tapCount = 0
             dispatch(context, trigger, TriggerGesture.TAP)
             return
         }
 
-        // Multi-tap is bound, so a press held past the long-press threshold must not
+        // A sequence is bound, so a press held past the long-press threshold must not
         // count as a tap even when no HOLD action is bound — otherwise holding would
         // leave a phantom tap behind, and a hold followed by a tap would resolve as a
         // double tap the user never asked for.

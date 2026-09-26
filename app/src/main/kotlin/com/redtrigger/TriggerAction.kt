@@ -7,7 +7,8 @@ enum class TriggerGesture {
     TAP,
     DOUBLE_TAP,
     TRIPLE_TAP,
-    LONG_PRESS;
+    LONG_PRESS,
+    TAP_HOLD;
 
     val label: String
         get() = when (this) {
@@ -15,6 +16,7 @@ enum class TriggerGesture {
             DOUBLE_TAP -> "Double-tap"
             TRIPLE_TAP -> "Triple-tap"
             LONG_PRESS -> "Hold"
+            TAP_HOLD -> "Tap, then hold"
         }
 }
 
@@ -41,6 +43,12 @@ sealed interface TriggerAction {
     /** Raw shell line, run via `sh -c` as the shell uid. */
     data class ShellCommand(val command: String) : TriggerAction
 
+    /**
+     * Lock the device and drop biometric/trust-agent unlock until the primary
+     * credential is entered. Equivalent to AOSP's power-menu Lockdown.
+     */
+    data object Lockdown : TriggerAction
+
     companion object {
         private const val PREFS = "RedTriggerPrefs"
 
@@ -49,6 +57,7 @@ sealed interface TriggerAction {
         private const val KIND_MEDIA = "media"
         private const val KIND_LAUNCH = "launch"
         private const val KIND_SHELL = "shell"
+        private const val KIND_LOCKDOWN = "lockdown"
 
         private const val SEPARATOR = "|"
         private const val SEPARATOR_CHAR = '|'
@@ -102,6 +111,7 @@ sealed interface TriggerAction {
 
             return when (parts[0]) {
                 KIND_QUICK_SWITCH -> QuickSwitch
+                KIND_LOCKDOWN -> Lockdown
                 KIND_MEDIA -> if (parts.size >= 3) MediaPlayPause(parts[1], parts[2]) else None
                 KIND_LAUNCH -> if (parts.size >= 3) LaunchApp(parts[1], parts[2]) else None
                 KIND_SHELL -> if (parts.size >= 2) ShellCommand(parts.drop(1).joinToString(SEPARATOR)) else None
@@ -112,6 +122,7 @@ sealed interface TriggerAction {
         fun serialize(action: TriggerAction): String = when (action) {
             None -> KIND_NONE
             QuickSwitch -> KIND_QUICK_SWITCH
+            Lockdown -> KIND_LOCKDOWN
             is MediaPlayPause -> listOf(KIND_MEDIA, action.packageName, action.component).joinToString(SEPARATOR)
             is LaunchApp -> listOf(KIND_LAUNCH, action.packageName, action.component).joinToString(SEPARATOR)
             is ShellCommand -> KIND_SHELL + SEPARATOR + action.command
@@ -121,6 +132,7 @@ sealed interface TriggerAction {
         fun describe(action: TriggerAction): String = when (action) {
             None -> "None"
             QuickSwitch -> "Switch to previous app"
+            Lockdown -> "Lockdown (disable biometrics)"
             is MediaPlayPause -> "Play/pause ${action.packageName}"
             is LaunchApp -> "Open ${action.packageName}"
             is ShellCommand -> "Shell: ${action.command}"

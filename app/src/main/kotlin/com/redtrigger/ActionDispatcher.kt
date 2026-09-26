@@ -44,6 +44,13 @@ object ActionDispatcher {
     private const val ACTION_KEY_DOWN = 0
     private const val ACTION_KEY_UP = 1
 
+    /** Shell command that triggers lockdown; argv form, so it runs without a shell. */
+    private val LOCKDOWN_ARGV = arrayOf(
+        "locksettings",
+        "require-strong-auth",
+        "STRONG_AUTH_REQUIRED_AFTER_USER_LOCKDOWN"
+    )
+
     /**
      * A repeated media action this soon after the last one is contact bounce from the
      * SAR sensor, not a second press: the capacitive trigger can report several
@@ -138,12 +145,29 @@ object ActionDispatcher {
 
             TriggerAction.QuickSwitch -> quickSwitch()
 
+            TriggerAction.Lockdown -> runLockdown()
+
             is TriggerAction.MediaPlayPause -> toggleMedia(context, trigger, action.packageName, action.component)
 
             is TriggerAction.LaunchApp -> launchApp(action.component)
 
             is TriggerAction.ShellCommand -> shell(action.command)
         }
+    }
+
+    /**
+     * Lock the device and require the primary credential, disabling biometric and
+     * trust-agent unlock until it is entered.
+     *
+     * There is no public app API for this — AOSP's power-menu Lockdown reaches an
+     * internal `requireStrongAuth` call — so it is driven through the shell
+     * `locksettings` command, which runs as the shell uid via Shizuku and needs no
+     * credential itself.
+     */
+    fun runLockdown(): String? {
+        val output = InputReader.runShellCommand(*LOCKDOWN_ARGV)
+        DebugLog.log(TAG, if (output == null) "Lockdown: Shizuku not connected" else "Lockdown sent")
+        return output
     }
 
     /**
