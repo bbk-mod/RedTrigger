@@ -35,6 +35,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.activity.compose.BackHandler
 import com.redtrigger.AppCatalog
+import com.redtrigger.BluetoothAutoPlay
 import com.redtrigger.BootReceiver
 import com.redtrigger.DebugLog
 import com.redtrigger.InputReader
@@ -77,6 +78,7 @@ fun MainContent(onNavigate: (Screen) -> Unit) {
     var shizukuPermission by remember { mutableStateOf(false) }
     var keyMapperInstalled by remember { mutableStateOf(false) }
     var autoEnableOnBoot by remember { mutableStateOf(false) }
+    var autoPlayBt by remember { mutableStateOf(false) }
     var notificationAccess by remember { mutableStateOf(false) }
     var statusTick by remember { mutableStateOf(0L) }
     var menuExpanded by remember { mutableStateOf(false) }
@@ -85,6 +87,7 @@ fun MainContent(onNavigate: (Screen) -> Unit) {
     var gestureTarget by remember { mutableStateOf<InputReader.Trigger?>(null) }
     var actionTarget by remember { mutableStateOf<ActionTarget?>(null) }
     var appPickRequest by remember { mutableStateOf<AppPickRequest?>(null) }
+    var autoplayPick by remember { mutableStateOf(false) }
     var shellTarget by remember { mutableStateOf<ActionTarget?>(null) }
     var showDiagnostics by remember { mutableStateOf(false) }
 
@@ -96,6 +99,7 @@ fun MainContent(onNavigate: (Screen) -> Unit) {
         triggersEnabled = TriggerManager.isTriggersEnabled(context)
         keyMapperInstalled = TriggerManager.isKeyMapperInstalled(context)
         autoEnableOnBoot = BootReceiver.isAutoEnableEnabled(context)
+        autoPlayBt = BluetoothAutoPlay.isEnabled(context)
         shizukuInstalled = TriggerManager.isShizukuInstalled(context)
         shizukuRunning = TriggerManager.isShizukuRunning()
         shizukuPermission = TriggerManager.isShizukuPermission()
@@ -496,6 +500,52 @@ fun MainContent(onNavigate: (Screen) -> Unit) {
 
                         HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
 
+                        val autoplayApp = remember(statusTick) { BluetoothAutoPlay.app(context) }
+
+                        ToggleRow("Auto-play on Bluetooth connect", autoPlayBt) { enabled ->
+                            BluetoothAutoPlay.setEnabled(context, enabled)
+                            autoPlayBt = enabled
+                        }
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { autoplayPick = true }
+                                .padding(vertical = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "App to play",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = autoplayApp?.first ?: "No app chosen",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (autoplayApp == null)
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    else
+                                        MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            Text(
+                                text = "Change",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        Text(
+                            text = "Starts the chosen app playing when Bluetooth headphones connect. " +
+                                "Active while triggers are enabled.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
                         Text(
                             text = "Trigger actions",
                             style = MaterialTheme.typography.titleMedium,
@@ -663,6 +713,17 @@ fun MainContent(onNavigate: (Screen) -> Unit) {
                         TriggerAction.LaunchApp(entry.packageName, entry.component)
                     }
                     TriggerAction.save(context, request.target.trigger, request.target.gesture, action)
+                    statusTick++
+                }
+            )
+        }
+
+        if (autoplayPick) {
+            AppPickerDialog(
+                onDismiss = { autoplayPick = false },
+                onPick = { entry ->
+                    autoplayPick = false
+                    BluetoothAutoPlay.setApp(context, entry.packageName, entry.component)
                     statusTick++
                 }
             )

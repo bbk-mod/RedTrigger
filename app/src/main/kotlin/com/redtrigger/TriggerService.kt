@@ -7,6 +7,8 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.database.ContentObserver
+import android.media.AudioDeviceCallback
+import android.media.AudioManager
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -40,6 +42,7 @@ class TriggerService : Service() {
 
     private var sceneObserver: ContentObserver? = null
     private var modeObserver: ContentObserver? = null
+    private var autoPlayCallback: AudioDeviceCallback? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -53,6 +56,7 @@ class TriggerService : Service() {
         DebugLog.log("Service", "Foreground notification posted")
         startObserving()
         DebugLog.log("Service", "ContentObservers registered")
+        startAutoPlayWatcher()
         startInputReader()
         isRunning = true
         DebugLog.log("Service", "Service fully started, isRunning=true")
@@ -139,6 +143,30 @@ class TriggerService : Service() {
         modeObserver = null
     }
 
+    /**
+     * Watch for Bluetooth headphones connecting while the service runs. The
+     * callback itself checks whether auto-play is enabled, so the setting can be
+     * toggled without restarting the service.
+     */
+    private fun startAutoPlayWatcher() {
+        if (autoPlayCallback != null) return
+
+        val audioManager = getSystemService(AudioManager::class.java) ?: return
+        val callback = BluetoothAutoPlay.callback(this)
+        audioManager.registerAudioDeviceCallback(callback, Handler(Looper.getMainLooper()))
+        autoPlayCallback = callback
+        DebugLog.log("AutoPlay", "Audio device watcher registered")
+    }
+
+    private fun stopAutoPlayWatcher() {
+        val callback = autoPlayCallback ?: return
+        autoPlayCallback = null
+        try {
+            getSystemService(AudioManager::class.java)?.unregisterAudioDeviceCallback(callback)
+        } catch (_: Exception) {
+        }
+    }
+
     private fun createNotificationChannel() {
         val channel = NotificationChannel(
             CHANNEL_ID,
@@ -169,6 +197,7 @@ class TriggerService : Service() {
     override fun onDestroy() {
         shuttingDown = true
         stopObserving()
+        stopAutoPlayWatcher()
         TriggerGestureDetector.reset()
         InputReader.onTrigger = null
         InputReader.stop()

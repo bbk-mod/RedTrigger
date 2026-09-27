@@ -97,6 +97,9 @@ object ActionDispatcher {
     /** Direction of the last accepted media dispatch, per trigger. */
     private val lastMediaDirection = ConcurrentHashMap<InputReader.Trigger, Boolean>()
 
+    /** Guards an auto-play run so a second connect cannot overlap the first. */
+    private val autoPlayInFlight = AtomicBoolean(false)
+
     fun handle(context: Context, trigger: InputReader.Trigger, gesture: TriggerGesture) {
         val action = TriggerAction.load(context, trigger, gesture)
         if (action == TriggerAction.None) return
@@ -240,21 +243,30 @@ object ActionDispatcher {
     }
 
     /**
+     * Start [packageName]'s playback, never pausing. Used by auto-play on
+     * Bluetooth connect, where playback should always begin.
+     *
+     * Blocking; call off the main thread. Overlapping runs are ignored.
+     */
+    fun startApp(context: Context, packageName: String, component: String) {
+        if (!autoPlayInFlight.compareAndSet(false, true)) {
+            DebugLog.log(TAG, "Auto-play still running, ignoring")
+            return
+        }
+        try {
+            startPlayback(context.applicationContext, null, packageName, component, null)
+        } catch (e: Exception) {
+            DebugLog.log(TAG, "ERROR: ${e.javaClass.simpleName}: ${e.message}")
+        } finally {
+            autoPlayInFlight.set(false)
+        }
+    }
+
+    /**
      * Play/pause one specific app.
      *
-     * 1. If the app already has a MediaSession, toggle it. Nothing becomes
-     *    visible and no other app's playback is touched.
-     * 2. If not, but the system still routes media keys to this app — its last
-     *    MediaButtonReceiver, which survives process death — send a global PLAY:
-     *    the receiver revives playback without launching any UI.
-     * 3. Otherwise launch it and wait (event-driven, capped) for a session.
-     * 4. If a session appears, start playback explicitly — a freshly launched
-     *    app is not guaranteed to resume on its own; the platform has no
-     *    mechanism that restores playback after process death.
-     * 5. If it still never appears, fall back to the global media key and say so.
-     *    This fallback is NOT targeted: it hits whatever holds the active
-     *    session, which is exactly what we set out to avoid, so it is logged
-     *    loudly rather than silently.
+     * 1. If the app is already playing, pause it. Nothing else is touched.
+     * 2. Otherwise start playback (see [startPlayback]).
      */
     private fun toggleMedia(
         context: Context,
@@ -269,15 +281,44 @@ object ActionDispatcher {
         }
 
         val existing = MediaControlService.controllersFor(context, packageName).firstOrNull()
+        if (existing != null && MediaControlService.isPlaying(existing)) {
+            MediaControlService.pause(existing)
+            lastMediaDirection[trigger] = false
+            DebugLog.log(TAG, "Paused $packageName")
+            return
+        }
+
+        lastMediaDirection[trigger] = true
+        startPlayback(context, trigger, packageName, component, existing)
+    }
+
+    /**
+     * Make one specific app play.
+     *
+     * 1. If it already has a MediaSession ([existing]), start playback on it.
+     * 2. If not, but the system still routes media keys to this app — its last
+     *    MediaButtonReceiver, which survives process death — send a global PLAY:
+     *    the receiver revives playback without launching any UI.
+     * 3. Otherwise launch it and wait (event-driven, capped) for a session.
+     * 4. If a session appears, start playback explicitly — a freshly launched
+     *    app is not guaranteed to resume on its own; the platform has no
+     *    mechanism that restores playback after process death.
+     * 5. If it still never appears, fall back to the global media key and say so.
+     *    This fallback is NOT targeted: it hits whatever holds the active
+     *    session, which is exactly what we set out to avoid, so it is logged
+     *    loudly rather than silently.
+     *
+     * [trigger] is null for auto-play, which has no trigger to track.
+     */
+    private fun startPlayback(
+        context: Context,
+        trigger: InputReader.Trigger?,
+        packageName: String,
+        component: String,
+        existing: MediaController?
+    ) {
         if (existing != null) {
-            if (MediaControlService.isPlaying(existing)) {
-                MediaControlService.pause(existing)
-                lastMediaDirection[trigger] = false
-                DebugLog.log(TAG, "Paused $packageName")
-            } else {
-                lastMediaDirection[trigger] = true
-                confirmPlaying(context, trigger, packageName, existing, "existing session")
-            }
+            confirmPlaying(context, trigger, packageName, existing, "existing session")
             return
         }
 
@@ -291,7 +332,6 @@ object ActionDispatcher {
                 DebugLog.log(TAG, "$packageName owns media key routing, sending global play")
                 InputReader.runShellCommand("input", "keyevent", KEYCODE_MEDIA_PLAY.toString())
             }
-            lastMediaDirection[trigger] = true
 
             // The receiver revives the app, but its player is still coming up and its
             // own restore can land after our key, settling it paused. Re-assert play
@@ -316,17 +356,20 @@ object ActionDispatcher {
         )
 
         if (launched != null) {
-            lastMediaDirection[trigger] = true
             confirmPlaying(context, trigger, packageName, launched, "launched app")
             return
         }
 
+        // Auto-play must start playback, so it sends the explicit PLAY key; the
+        // play/pause action keeps the toggling key so a press can still pause an
+        // app whose session could not be read.
+        val fallbackKey = if (trigger == null) KEYCODE_MEDIA_PLAY else KEYCODE_MEDIA_PLAY_PAUSE
         DebugLog.log(
             TAG,
             "FAIL: $packageName gave no session after ${MEDIA_SESSION_TIMEOUT_MS}ms, " +
                 "falling back to the GLOBAL media key (may hit another app)"
         )
-        InputReader.runShellCommand("input", "keyevent", KEYCODE_MEDIA_PLAY_PAUSE.toString())
+        InputReader.runShellCommand("input", "keyevent", fallbackKey.toString())
     }
 
     /**
@@ -348,7 +391,7 @@ object ActionDispatcher {
      */
     private fun confirmPlaying(
         context: Context,
-        trigger: InputReader.Trigger,
+        trigger: InputReader.Trigger?,
         packageName: String,
         controller: MediaController,
         path: String,
@@ -364,7 +407,7 @@ object ActionDispatcher {
         var dropped = false
         for (attempt in 1..PLAY_MAX_RETRIES) {
             MediaControlService.play(target)
-            lastMediaDispatch[trigger] = SystemClock.uptimeMillis()
+            trigger?.let { lastMediaDispatch[it] = SystemClock.uptimeMillis() }
             DebugLog.log(TAG, "$label (attempt $attempt)")
 
             val playStartedAt = SystemClock.uptimeMillis()
@@ -395,7 +438,7 @@ object ActionDispatcher {
                         playingSince = now
                         deadline = now + PLAY_STABILITY_MS + PLAY_POLL_MS
                     } else if (now - playingSince >= PLAY_STABILITY_MS) {
-                        lastMediaDispatch[trigger] = now
+                        trigger?.let { lastMediaDispatch[it] = now }
                         DebugLog.log(TAG, "$packageName confirmed playing")
                         if (diagnostics) {
                             MediaDiagnostics.finish(context, packageName, "confirmed playing (attempt $attempt)")
